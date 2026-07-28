@@ -1,0 +1,40 @@
+# --- Generated data (regenerable, large) ---
+
+# Preprocessed Gwyddion files (~512 MB). Fully regenerable from the raw .ibw
+# acquisitions with:  python3 scripts/moire_prep.py ~/Downloads/<sample>
+gwy/
+
+# Copy of the published paper SI (~28 MB binary, not our content).
+reference/
+
+# Raw microscope acquisitions live outside this folder (~/Downloads) and are
+# never written here, but guard against a stray copy landing in the repo.
+*.ibw
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# --- Editor / OS noise ---
+.DS_Store
+.DS_Store?
+._*
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- Excel/Office lock files ---
+~$*.xlsx
+~$*.xls
