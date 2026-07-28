@@ -2,9 +2,9 @@
 """
 Local strain mapping figure in the format of Science ade9995 Fig. S13.
 
-Formatting matched to the published figure: per-site hexagonal tiles (not a
-smooth field), RdBu_r diverging colormap centred on zero, a horizontal
-"epsilon (%)" colorbar, x (nm) on the vertical axis and y (nm) on the
+Formatting matched to the published figure: a Delaunay triangulation of the
+moire sites (not a smooth field), RdBu_r diverging colormap centred on zero, a
+horizontal "epsilon (%)" colorbar, x (nm) on the vertical axis and y (nm) on the
 horizontal, bold panel letters with colour-coded labels, and a panel A locating
 each map.
 
@@ -17,16 +17,22 @@ phase gradient, and
     epsilon(r) = theta * (L(r) - <L>) / <L>
 
 is the layer heterostrain whose moire amplification produces the observed local
-wavelength deviation, with theta the fitted twist in radians. Tiles are laid on
-the reconstructed moire lattice, optionally subdivided, and each Voronoi cell is
-coloured by epsilon at its centre.
+wavelength deviation, with theta the fitted twist in radians. Sites are laid on
+the reconstructed moire lattice, optionally subdivided, and each triangle of
+their Delaunay triangulation is coloured by epsilon at its centroid - the same
+next-neighbour site geometry the paper colours, read from the phase field.
 
-Tile spacing is display density, not resolution: the real resolution is set by
+Presets carry the subdivision that lands nearest the published triangle density
+(~1709): MoS2 at subdiv 3 gives ~2030 triangles, WSe2 - whose moire is ~4x
+shorter - at subdiv 2 gives ~1913. Both overshoot, but the count goes as
+subdiv**2, so the next step down undershoots by more than these overshoot.
+
+Triangle size is display density, not resolution: the real resolution is set by
 the Bragg mask width (--sigma-frac). Subdividing is free; widening the mask is
 not - it inflates noise and leaks the neighbouring Bragg peak.
 
-    python3 strainmap_figS13.py --sample MoS2_2L
-    python3 strainmap_figS13.py --sample WSe2
+    python3 strainmap_figS13.py --preset MoS2_2L
+    python3 strainmap_figS13.py --preset WSe2
 """
 import argparse
 import glob
@@ -40,7 +46,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from matplotlib.patches import Rectangle
-from scipy.spatial import Voronoi
+from scipy.spatial import Delaunay
 
 from moire_prep import load_ibw, level, nlm
 from moire_verify import lattice_points
@@ -57,12 +63,19 @@ from paths import RAW, GRID_FITS, results_for, sample_of
 # 2L0005 carries a second ~9.6 nm periodicity that a wide search legitimately
 # prefers over the ~4 nm moire the rest of the set shows. Pinning the band keeps
 # the published figures reproducible.
+# A preset also pins the subdivision, chosen so the triangle count lands near
+# the published one; see the module docstring.
 PRESETS = {
     "MoS2_2L": dict(material="MoS2", layout="grid", klo=0.025, khi=0.12,
-                    title=r"2L MoS$_2$, 3$\times$3 grid"),
+                    subdiv=3, title=r"2L MoS$_2$, 3$\times$3 grid"),
     "WSe2": dict(material="WSe2", layout="layers", klo=0.20, khi=0.36,
-                 title=r"WSe$_2$ multilayers"),
+                 subdiv=2, title=r"WSe$_2$ multilayers"),
 }
+
+# triangles per panel in the published Fig. S13, for the density report
+PAPER_TRIANGLES = 1709
+# an unknown sample gets the same starting density as MoS2
+DEFAULT_SUBDIV = 3
 
 ROW = {1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 2}
 COL = {1: 0, 2: 1, 3: 2, 4: 0, 5: 1, 6: 2, 7: 0, 8: 1, 9: 2}
@@ -72,7 +85,7 @@ TINT = ["#1f77b4", "#d62728", "#ff7f0e", "#2ca02c", "#9467bd",
         "#8c564b", "#e377c2", "#17becf", "#7f7f7f"]
 
 L_MIN, L_MAX, S_MAX = 13.0, 21.0, 1.5
-# weakest tiles keep this much opacity, so they are de-emphasised, not erased
+# weakest triangles keep this much opacity, so they are de-emphasised, not erased
 ALPHA_FLOOR = 0.5
 
 
@@ -157,31 +170,29 @@ def strain_field(path, cfg, crop=0.08, subdiv=3, sigma_frac=0.35):
                 L=res["lmean"], twist=res["solutions"][0]["twist"])
 
 
-def voronoi_tiles(pts, lo, hi):
-    """Hexagonal Voronoi tiles for the lattice points inside [lo, hi].
+def delaunay_tiles(pts, lo, hi):
+    """Delaunay triangles over the moire sites, those centred inside [lo, hi].
 
-    Points outside the box are tessellated but not drawn: they bound the cells of
-    the outermost drawn sites, which a naive clip would turn into large wedges.
+    The paper reads strain off next-neighbour site separations, so the triangles
+    joining neighbouring sites are the natural tile. Sites outside the box are
+    triangulated but their triangles are not drawn: they close the triangles of
+    the outermost drawn sites, which would otherwise leave a serrated edge.
+
+    A triangular lattice triangulates into near-equilateral triangles, so the
+    only irregular ones are the slivers Delaunay lays along the convex hull to
+    span concave gaps. They are dropped on their longest edge.
     """
-    vor = Voronoi(pts)
-    inside = ((pts[:, 0] >= lo) & (pts[:, 0] <= hi) &
-              (pts[:, 1] >= lo) & (pts[:, 1] <= hi))
-    polys, centers = [], []
-    for i in np.where(inside)[0]:
-        region = vor.regions[vor.point_region[i]]
-        if not region or -1 in region:
-            continue
-        poly = np.clip(vor.vertices[region], lo, hi)
-        if poly.shape[0] >= 3:
-            polys.append(poly)
-            centers.append(pts[i])
-    if not polys:
+    if len(pts) < 3:
         return [], np.empty((0, 2))
-    areas = np.array([0.5 * abs(np.dot(p[:, 0], np.roll(p[:, 1], 1)) -
-                                np.dot(p[:, 1], np.roll(p[:, 0], 1)))
-                      for p in polys])
-    keep = areas < 2.5 * np.median(areas)
-    return ([p for p, k in zip(polys, keep) if k], np.array(centers)[keep])
+    tri = np.asarray(pts)[Delaunay(pts).simplices]        # (T, 3, 2)
+    cen = tri.mean(axis=1)
+    inside = ((cen[:, 0] >= lo) & (cen[:, 0] <= hi) &
+              (cen[:, 1] >= lo) & (cen[:, 1] <= hi))
+    if not inside.any():
+        return [], np.empty((0, 2))
+    longest = np.linalg.norm(tri - np.roll(tri, 1, axis=1), axis=2).max(axis=1)
+    keep = inside & (longest < 1.5 * np.median(longest[inside]))
+    return list(tri[keep]), cen[keep]
 
 
 def panel_a(ax, layout, entries):
@@ -247,17 +258,20 @@ def main():
     ap.add_argument("--pct", type=float, default=98.0,
                     help="percentile of |eps| that sets the colour limit "
                          "(default 99). Higher = wider scale = fewer saturated "
-                         "tiles, closer to the pale look of the published figure")
-    ap.add_argument("--subdiv", type=int, default=3,
-                    help="tile-lattice subdivision; spacing becomes L/subdiv. "
-                         "Display density only - samples the same field more "
-                         "finely without adding noise (default 3)")
+                         "triangles, closer to the pale look of the published "
+                         "figure")
+    ap.add_argument("--subdiv", type=int, default=None,
+                    help="site-lattice subdivision; site spacing, and so the "
+                         "triangle edge, becomes L/subdiv. Display density only "
+                         "- samples the same field more finely without adding "
+                         "noise. Defaults to the preset's value, chosen to land "
+                         "near the paper's ~1709 triangles (MoS2 3, WSe2 2)")
     ap.add_argument("--sigma-frac", type=float, default=0.35,
                     help="Bragg mask width in units of |k| (default 0.35). "
                          "Widening genuinely sharpens the field but inflates "
                          "noise and leaks the neighbouring peak")
     ap.add_argument("--amp-pct", type=float, default=25.0,
-                    help="tiles below this percentile of local Bragg amplitude "
+                    help="triangles below this percentile of local Bragg amplitude "
                          "fade out, since a weak moire signal gives an "
                          "unreliable phase gradient; 0 disables (default 25)")
     ap.add_argument("--crop", type=float, default=0.08)
@@ -286,17 +300,18 @@ def main():
         out_sample = sample_of(args.path)
     if args.lo is not None:
         cfg["klo"], cfg["khi"] = args.lo, args.hi
+    subdiv = args.subdiv or cfg.get("subdiv", DEFAULT_SUBDIV)
     fields, tiles = {}, {}
     for e in entries:
-        f = strain_field(e["path"], cfg, args.crop, args.subdiv, args.sigma_frac)
+        f = strain_field(e["path"], cfg, args.crop, subdiv, args.sigma_frac)
         if f is None:
             print(f"  {e['tag']}: no hexagon, skipped")
             continue
         lo = f["m"] * f["px"]
         hi = (f["n"] - f["m"]) * f["px"]
-        polys, centers = voronoi_tiles(f["pts"], lo, hi)
+        polys, centers = delaunay_tiles(f["pts"], lo, hi)
         if not len(centers):
-            print(f"  {e['tag']}: no tiles, skipped")
+            print(f"  {e['tag']}: no triangles, skipped")
             continue
         ei = np.clip(((centers[:, 1] - lo) / f["px"]).astype(int),
                      0, f["eps"].shape[0] - 1)
@@ -305,7 +320,7 @@ def main():
         fields[e["tag"]] = (e, f, lo, hi)
         tiles[e["tag"]] = (polys, f["eps"][ei, ej], f["amp"][ei, ej])
         print(f"  {e['tag']}: L={f['L']:.2f} nm  twist={f['twist']:.2f} deg  "
-              f"{len(polys)} tiles")
+              f"{len(polys)} triangles")
 
     if not fields:
         print("no usable scans")
@@ -316,14 +331,16 @@ def main():
     sat = 100.0 * np.mean(np.abs(allbits) > vmax)
     frac = 100.0 * np.mean(np.abs(allbits) > 0.3)
     Lm = np.mean([f["L"] for _, f, _, _ in fields.values()])
-    spacing = Lm / args.subdiv
+    spacing = Lm / subdiv
     fwhm = 2.355 / (2 * np.pi * args.sigma_frac * (2 / (np.sqrt(3) * Lm)))
+    ntri = int(np.mean([len(v) for _, v, _ in tiles.values()]))
     print(f"\ncolour limit +/- {vmax:.2f} % (p{args.pct:g})   median |eps| = "
-          f"{np.median(np.abs(allbits)):.2f} %   {sat:.1f} % of tiles saturate")
-    print(f"the paper uses +/- 0.3 %; {frac:.0f} % of these tiles exceed that")
-    print(f"{int(np.mean([len(v) for _, v, _ in tiles.values()]))} tiles/panel   "
-          f"spacing {spacing:.2f} nm   field FWHM ~{fwhm:.1f} nm "
-          f"({fwhm/spacing:.1f}x oversampled, neighbouring tiles correlated)")
+          f"{np.median(np.abs(allbits)):.2f} %   {sat:.1f} % of triangles saturate")
+    print(f"the paper uses +/- 0.3 %; {frac:.0f} % of these triangles exceed that")
+    print(f"{ntri} triangles/panel (subdiv {subdiv}; the paper's panels carry "
+          f"~{PAPER_TRIANGLES}, so {ntri/PAPER_TRIANGLES:.2f}x)")
+    print(f"site spacing {spacing:.2f} nm = triangle edge   field FWHM ~{fwhm:.1f} nm "
+          f"({fwhm/spacing:.1f}x oversampled, neighbouring triangles correlated)")
 
     if cfg["layout"] == "grid":
         nrows, ratios = 4, [0.85, 1, 1, 1]
@@ -366,8 +383,8 @@ def main():
         ax = fig.add_subplot(gs[e["slot"][0], e["slot"][1]])
         polys, vals, amps = tiles[tag]
         # opacity tracks the local Bragg amplitude: where the moire signal is
-        # weak the phase gradient is unreliable, so those tiles fade towards the
-        # background instead of showing a confident-looking spurious spike
+        # weak the phase gradient is unreliable, so those triangles fade towards
+        # the background instead of showing a confident-looking spurious spike
         cols = plt.cm.RdBu_r(plt.Normalize(-vmax, vmax)(vals))
         if args.amp_pct > 0:
             a0 = np.percentile(amps, args.amp_pct)

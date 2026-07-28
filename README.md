@@ -110,22 +110,32 @@ One resolvable hexagon per scan — see the caveat below.
   Median |ε| is 0.23 %, comparable to the paper's ±0.3 % range, but the
   distribution is heavy-tailed. The colour limit defaults to the 98th percentile
   of |ε| (`--pct`), which keeps the pale look of the published figure instead of
-  saturating a fifth of the tiles. Tile opacity tracks the local Bragg amplitude
-  (`--amp-pct`): where the moire signal is weak the phase gradient is
-  unreliable, so those tiles fade rather than showing a confident-looking spike.
+  saturating a fifth of the triangles. Triangle opacity tracks the local Bragg
+  amplitude (`--amp-pct`): where the moire signal is weak the phase gradient is
+  unreliable, so those fade rather than showing a confident-looking spike.
   Neither control alters the values — only how they are displayed.
 - **WSe₂ strain magnitudes are not comparable to MoS₂ ones.** Median |ε| is
   0.77 % for WSe₂ vs 0.23 % for MoS₂, but ε = θ·(δL/L), and WSe₂'s twist (4.6°)
   is 4.3× MoS₂'s (1.07°). The same fractional wavelength noise therefore maps to
   ~4.3× larger ε — 0.23 × 4.3 ≈ 1.0 %, close to what is seen. Most of the
   difference is that scaling, not more strain. Compare ε only within a sample.
-- **Tile density is display resolution, not information.** ~1015 tiles/panel at
+- **The tiles are Delaunay triangles, matched to the paper's density.** The paper
+  colours the triangles joining next-neighbour moiré sites, so the sites are
+  triangulated rather than given Voronoi cells; the triangle count comes out at
+  ~2× the site count. Each preset pins the subdivision landing nearest the
+  published ~1709 triangles/panel: MoS₂ at 3 gives 2038 (1.19×), WSe₂ — whose
+  moiré is ~4× shorter — at 2 gives 1917 (1.12×). Both overshoot, but the count
+  goes as subdiv², so one step down undershoots by more. A scan run without a
+  preset falls back to 3.
+- **Triangle density is display resolution, not information.** MoS₂ sits at
   5.7 nm spacing, but the field's true resolution is FWHM ~16 nm, set by the
-  Bragg mask (`--sigma-frac`, default 0.35). Tiles are therefore ~2.8x
+  Bragg mask (`--sigma-frac`, default 0.35). Triangles are therefore ~2.8x
   oversampled and neighbours are correlated. Subdividing costs nothing —
-  4x the tiles left median |ε| unchanged at 0.153 → 0.154 % — but *widening the
-  mask* to buy real resolution inflates strain ~36 % in noise and leaks the
-  neighbouring Bragg peak, so it is not a free lunch. Read patterns, not tiles.
+  `--subdiv 6`, 4x the triangles, left median |ε| unchanged at 0.23 % — but
+  *widening the mask* to buy real resolution is not a free lunch: `--sigma-frac
+  0.7` halves the FWHM to ~8 nm and triples median |ε| to 0.73 %, which is noise
+  plus leakage from the neighbouring Bragg peak, not strain. Read patterns, not
+  individual triangles.
 - **The WSe₂ multilayers.** A trilayer has two twisted interfaces, but the fitter
   finds only one hexagon per scan. That is consistent with L3 sitting near L1's
   orientation — the two ~4° moirés then nearly coincide, and the L1–L3 moiré moves
