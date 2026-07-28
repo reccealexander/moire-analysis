@@ -44,19 +44,28 @@ default their output into `results/<sample>/`, overridable with `-o`.
 | `moire_verify.py` | overlay figures — identified hexagon in FFT, reconstructed lattice in real space |
 | `moire_map.py` | spatial θ(x,y) and ε(x,y) maps by geometric phase analysis (Figs. S12/S13) |
 | `moire_two_hex.py` | fits several coexisting moiré hexagons, for multilayer stacks |
-| `strainmap_figS13.py` | strain-map figure in the published Fig. S13 format (`--sample MoS2_2L` / `WSe2`) |
-| `wse2_fft_figure.py` | the WSe₂ FFT + hexagon figure |
+| `strainmap_figS13.py` | strain-map figure in the published Fig. S13 format |
+| `moire_fit.py` | shared hexagon finder — the single source of truth for locating a moiré |
 | `make_grid_workbook.py` | builds the Excel workbook from `data/grid_fits.json` |
 | `add_all_images_sheet.py` | appends the per-image sheet to that workbook |
 
-Run them from `scripts/`, e.g.
+Every analysis script takes **a path (file or folder) plus `-m MATERIAL`**. The
+reciprocal search band is derived from the scan geometry, so an unseen sample
+needs no new configuration — only the lattice constant, which cannot be inferred
+from an image.
 
 ```bash
-cd ~/moire_analysis/scripts
-python3 moire_prep.py ~/Downloads/2L_MoS2          # regenerate all .gwy
-python3 moire_map.py ~/Downloads/2L_MoS2/LFM_2LMoS20017.ibw -m MoS2
-python3 moire_calc.py                              # the GUI calculator
+cd ~/Desktop/moire_analysis/scripts
+python3 moire_prep.py   ~/Downloads/2L_MoS2                  # regenerate all .gwy
+python3 moire_verify.py /path/to/scan.ibw       -m WS2       # FFT + lattice overlay
+python3 moire_map.py    /path/to/folder         -m WS2       # GPA strain maps
+python3 strainmap_figS13.py /path/to/folder     -m WS2       # Fig. S13-format figure
+python3 moire_calc.py                                        # the GUI calculator
 ```
+
+`--preset MoS2_2L` / `--preset WSe2` reproduce the published figures for the two
+samples here: a preset carries the curated panel layout *and* a pinned search
+band. Pass `--lo/--hi` for any scan carrying more than one periodicity.
 
 **Workbook regeneration order matters.** `make_grid_workbook.py` writes a fresh
 file; `add_all_images_sheet.py` appends to it. Run them in that order or the

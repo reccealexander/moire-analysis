@@ -15,6 +15,7 @@ fit for the same scan. The script prints this check.
     python3 moire_map.py FILE.ibw [-m MATERIAL] [--sigma-frac F]
 """
 import argparse
+import glob
 import os
 
 import numpy as np
@@ -23,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from moire_prep import load_ibw, level, nlm
-from moire_verify import find_hexagon
+from moire_fit import find_moire
 from moire_calc import analyze, MATERIALS, atomic_triple
 from paths import results_for, sample_of
 
@@ -89,19 +90,16 @@ def decompose_field(b1x, b1y, b2x, b2y, a_lat, phi0):
     return twist, hetero
 
 
-def global_phi0(b1, b2, a_lat):
-    res = analyze(b1, b2, a_lat, "recip")
-    if not res["solutions"]:
-        return None, res
-    return np.radians(res["solutions"][0]["phi0"]), res
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("file")
+    ap.add_argument("path", help="an .ibw file or a folder of them")
     ap.add_argument("-m", "--material", default="MoS2", choices=list(MATERIALS))
-    ap.add_argument("--lo", type=float, default=0.025)
-    ap.add_argument("--hi", type=float, default=0.12)
+    ap.add_argument("--lo", type=float, default=None,
+                    help="min |k| (1/nm); default from scan geometry")
+    ap.add_argument("--hi", type=float, default=None,
+                    help="max |k| (1/nm); default from scan geometry")
     ap.add_argument("-o", "--outdir", default=None,
                     help="where the map goes (default: project results/<sample>)")
     ap.add_argument("--crop", type=float, default=0.12,
@@ -109,20 +107,35 @@ def main():
     args = ap.parse_args()
 
     a_lat = MATERIALS[args.material]
-    raw, scan, _ = load_ibw(args.file, "LateralTrace")
+    if os.path.isdir(args.path):
+        files = sorted(glob.glob(os.path.join(args.path, "*.ibw")))
+    else:
+        files = [args.path]
+    for path in files:
+        try:
+            one(path, a_lat, args)
+        except Exception as exc:
+            print(f"  {os.path.basename(path)}: {exc}")
+
+
+def one(path, a_lat, args):
+    """Render the twist / heterostrain maps for a single scan."""
+    raw, scan, _ = load_ibw(path, "LateralTrace")
     n = raw.shape[0]
     px = scan * 1e9 / n
     size = scan * 1e9
     den = nlm(level(raw), 1.15)
 
     spec = np.fft.fftshift(np.fft.fft2(den * np.outer(np.hanning(n), np.hanning(n))))
-    b1, b2 = find_hexagon(spec, n, px, args.lo, args.hi)
-    if b1 is None:
-        print("no hexagon found - cannot map this scan")
+    b1, b2, res = find_moire(spec, n, px, a_lat, scan_nm=size,
+                             klo=args.lo, khi=args.hi)
+    tag = os.path.splitext(os.path.basename(path))[0]
+    if b1 is None or not res["solutions"]:
+        print(f"{tag}: no hexagon found - cannot map this scan")
         return
-    phi0, res = global_phi0(b1, b2, a_lat)
+    phi0 = np.radians(res["solutions"][0]["phi0"])
     gsol = res["solutions"][0]
-    print(f"global fit: L={res['lmean']:.2f} nm  twist={gsol['twist']:.3f} deg  "
+    print(f"{tag}  global fit: L={res['lmean']:.2f} nm  twist={gsol['twist']:.3f} deg  "
           f"heterostrain={gsol['hetero']*100:.2f} %")
 
     # phase fields use the plain (unwindowed) spectrum
@@ -133,17 +146,13 @@ def main():
     b2x, b2y = local_wavevectors(G2, b2, px)
     twist, hetero = decompose_field(b1x, b1y, b2x, b2y, a_lat, phi0)
 
-    # discard borders
     m = int(args.crop * n)
     sl = slice(m, n - m)
     twist_c = twist[sl, sl]
     hetero_c = hetero[sl, sl]
 
-    print(f"map mean : twist={np.nanmean(twist_c):.3f} deg  "
-          f"heterostrain={np.nanmean(hetero_c):.2f} %   "
-          f"(should match global fit)")
-    print(f"map range: twist {np.nanpercentile(twist_c,2):.2f}..{np.nanpercentile(twist_c,98):.2f} deg  "
-          f"strain {np.nanpercentile(hetero_c,2):.2f}..{np.nanpercentile(hetero_c,98):.2f} %")
+    print(f"   map mean : twist={np.nanmean(twist_c):.3f} deg  "
+          f"heterostrain={np.nanmean(hetero_c):.2f} %   (should match global fit)")
 
     ext = [m * px, (n - m) * px, (n - m) * px, m * px]
     fig, axs = plt.subplots(1, 3, figsize=(16, 5))
@@ -160,13 +169,14 @@ def main():
     plt.colorbar(im2, ax=axs[2], fraction=0.046)
     for ax in axs:
         ax.set_xlabel("nm")
-    tag = os.path.splitext(os.path.basename(args.file))[0]
     plt.suptitle(f"{tag}  -  GPA strain map")
     plt.tight_layout()
-    outdir = args.outdir or results_for(sample_of(args.file))
+    outdir = args.outdir or results_for(sample_of(path))
+    os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, f"strainmap_{tag}.png")
     plt.savefig(out, dpi=120)
-    print("wrote", out)
+    plt.close(fig)
+    print("   wrote", out)
 
 
 if __name__ == "__main__":

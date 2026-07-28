@@ -27,6 +27,7 @@ from skimage.feature import peak_local_max
 
 from moire_prep import load_ibw, level, nlm
 from moire_calc import analyze, MATERIALS
+from moire_fit import find_moire
 from paths import results_for, sample_of
 
 
@@ -47,51 +48,6 @@ def fft_of(path, channel="LateralTrace"):
     return lev, den, spec, n, px, scan * 1e9
 
 
-def find_hexagon(spec, n, px, lo, hi):
-    """Return (b1, b2) of the best first-order hexagon, in 1/nm."""
-    mag = np.abs(spec)
-    c = n // 2
-    yy, xx = np.mgrid[0:n, 0:n]
-    fx = (xx - c) / (n * px)
-    fy = (yy - c) / (n * px)
-    rad = np.hypot(fx, fy)
-
-    peaks = peak_local_max(np.where((rad > lo) & (rad < hi), mag, 0),
-                           min_distance=3, num_peaks=25)
-    cands = []
-    for y, x in peaks:
-        w = 2
-        sub = mag[y - w:y + w + 1, x - w:x + w + 1]
-        if sub.shape != (2 * w + 1, 2 * w + 1):
-            continue
-        gy, gx = np.mgrid[-w:w + 1, -w:w + 1]
-        tot = sub.sum()
-        cands.append((np.array([(x + (sub * gx).sum() / tot - c) / (n * px),
-                                (y + (sub * gy).sum() / tot - c) / (n * px)]),
-                      mag[y, x]))
-
-    def amp(v):
-        x = int(round(v[0] * n * px + c))
-        y = int(round(v[1] * n * px + c))
-        if 0 <= x < n and 0 <= y < n:
-            return mag[max(0, y - 1):y + 2, max(0, x - 1):x + 2].max()
-        return 0.0
-
-    best = None
-    for i, (b1, a1) in enumerate(cands):
-        for j, (b2, a2) in enumerate(cands):
-            if i == j:
-                continue
-            if np.hypot(*(b1 - b2)) < 0.02 or np.hypot(*(b1 + b2)) < 0.02:
-                continue
-            b3 = -(b1 + b2)
-            k = [np.hypot(*b1), np.hypot(*b2), np.hypot(*b3)]
-            if min(k) < lo or max(k) > hi or max(k) / min(k) > 1.5:
-                continue
-            score = min(a1, a2, amp(b3))
-            if best is None or score > best[0]:
-                best = (score, b1, b2)
-    return (best[1], best[2]) if best else (None, None)
 
 
 def phase_at(spec, n, px, b):
@@ -128,15 +84,21 @@ def lattice_points(b1, b2, spec, n, px, extent, margin=0.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("folder")
+    ap.add_argument("path", help="an .ibw file or a folder of them")
     ap.add_argument("-o", "--outdir", default=None,
                     help="where figures go (default: project results/<sample>)")
     ap.add_argument("-m", "--material", default="MoS2", choices=list(MATERIALS))
-    ap.add_argument("--lo", type=float, default=0.025, help="min |k| (1/nm)")
-    ap.add_argument("--hi", type=float, default=0.12, help="max |k| (1/nm)")
-    ap.add_argument("--lmin", type=float, default=13.0)
-    ap.add_argument("--lmax", type=float, default=21.0)
-    ap.add_argument("--smax", type=float, default=1.5, help="max plausible strain %")
+    ap.add_argument("--lo", type=float, default=None,
+                    help="min |k| (1/nm); default derived from the scan geometry")
+    ap.add_argument("--hi", type=float, default=None,
+                    help="max |k| (1/nm); default derived from the scan geometry")
+    ap.add_argument("--lmin", type=float, default=None,
+                    help="only keep fits with moire period above this (nm)")
+    ap.add_argument("--lmax", type=float, default=None,
+                    help="only keep fits with moire period below this (nm)")
+    ap.add_argument("--smax", type=float, default=None,
+                    help="only keep fits below this heterostrain (%%). Off by "
+                         "default: the fitter already rejects >5 %% as not one moire")
     ap.add_argument("--background", choices=["leveled", "denoised"], default="leveled",
                     help="image the lattice is drawn on. leveled (default) is the\n"
                          "conservative choice: NLM reinforces periodic structure, so\n"
@@ -144,22 +106,28 @@ def main():
     args = ap.parse_args()
 
     a_lat = MATERIALS[args.material]
+    if os.path.isdir(args.path):
+        files = sorted(glob.glob(os.path.join(args.path, "*.ibw")))
+    else:
+        files = [args.path]
     hits = []
-    for path in sorted(glob.glob(os.path.join(args.folder, "*.ibw"))):
+    for path in files:
         try:
             lev, den, spec, n, px, size = fft_of(path)
-            b1, b2 = find_hexagon(spec, n, px, args.lo, args.hi)
-            if b1 is None:
-                continue
-            res = analyze(b1, b2, a_lat, "recip")
-            if not res["solutions"]:
+            b1, b2, res = find_moire(spec, n, px, a_lat, scan_nm=size,
+                                     klo=args.lo, khi=args.hi)
+            if b1 is None or not res["solutions"]:
                 continue
             sol = res["solutions"][0]
-            if sol["hetero"] * 100 > args.smax:
+            if args.smax is not None and sol["hetero"] * 100 > args.smax:
                 continue
-            if not (args.lmin <= res["lmean"] <= args.lmax):
+            if args.lmin is not None and res["lmean"] < args.lmin:
                 continue
-            hits.append(dict(tag=re.sub(r".*?(\d+)\.ibw", r"\1", os.path.basename(path)),
+            if args.lmax is not None and res["lmean"] > args.lmax:
+                continue
+            base = os.path.basename(path)
+            m = re.search(r"(\d+L\d+)", base) or re.search(r"(\d{3,})\.ibw", base)
+            hits.append(dict(tag=m.group(1) if m else os.path.splitext(base)[0],
                              lev=lev, den=den, spec=spec, n=n, px=px, size=size,
                              b1=b1, b2=b2, res=res, sol=sol))
         except Exception:
@@ -168,11 +136,15 @@ def main():
     if not hits:
         print("no scans matched")
         return
-    print(f"{len(hits)} scans matched")
+    print(f"{len(hits)} scan(s) fitted")
+    for h in hits:
+        print(f"  {h['tag']}: L={h['res']['lmean']:.2f} nm  "
+              f"twist={h['sol']['twist']:.2f} deg  "
+              f"strain={h['sol']['hetero']*100:.2f} %")
 
     BG = "lev" if args.background == "leveled" else "den"
     for kind in ("fft", "real"):
-        ncol = 5
+        ncol = min(5, len(hits))
         nrow = int(np.ceil(len(hits) / ncol))
         fig, axs = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 3.6 * nrow))
         axs = np.atleast_1d(axs).ravel()
@@ -211,7 +183,8 @@ def main():
             ax.tick_params(labelsize=6)
         for ax in axs[len(hits):]:
             ax.axis("off")
-        outdir = args.outdir or results_for(sample_of(args.folder))
+        outdir = args.outdir or results_for(sample_of(args.path))
+        os.makedirs(outdir, exist_ok=True)
         out = os.path.join(outdir, f"moire_lattices_{kind}.png")
         plt.tight_layout()
         plt.savefig(out, dpi=105)

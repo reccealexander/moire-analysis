@@ -43,20 +43,25 @@ from matplotlib.patches import Rectangle
 from scipy.spatial import Voronoi
 
 from moire_prep import load_ibw, level, nlm
-from moire_verify import find_hexagon, lattice_points
-from moire_two_hex import candidates, best_hexagon
+from moire_verify import lattice_points
+from moire_fit import find_moire
 from moire_calc import analyze, MATERIALS
 from moire_map import bragg_phase, local_wavevectors
-from paths import RAW, GRID_FITS, results_for
+from paths import RAW, GRID_FITS, results_for, sample_of
 
-SAMPLES = {
-    # MoS2: one moire per scan, weak peaks close to DC, positions on a 3x3 grid
-    "MoS2_2L": dict(material="MoS2", klo=0.025, khi=0.12, max_strain=None,
-                    layout="grid", title=r"2L MoS$_2$, 3$\times$3 grid"),
-    # WSe2: strong peaks near 0.27 1/nm. max_strain rejects the geometrically
-    # irregular hexagons that otherwise decode to the bogus ~0.4 deg / 16 % root
-    "WSe2": dict(material="WSe2", klo=0.20, khi=0.36, max_strain=5.0,
-                 layout="layers", title=r"WSe$_2$ multilayers"),
+# Presets only carry what cannot be derived from the data: the material and a
+# curated panel layout. The reciprocal search band and the hexagon-quality rules
+# are handled by moire_fit for any scan.
+# A preset also pins the reciprocal band. Generic runs derive it from the scan
+# geometry, which is right for an unknown sample but deliberately wide: WSe2
+# 2L0005 carries a second ~9.6 nm periodicity that a wide search legitimately
+# prefers over the ~4 nm moire the rest of the set shows. Pinning the band keeps
+# the published figures reproducible.
+PRESETS = {
+    "MoS2_2L": dict(material="MoS2", layout="grid", klo=0.025, khi=0.12,
+                    title=r"2L MoS$_2$, 3$\times$3 grid"),
+    "WSe2": dict(material="WSe2", layout="layers", klo=0.20, khi=0.36,
+                 title=r"WSe$_2$ multilayers"),
 }
 
 ROW = {1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 2}
@@ -71,10 +76,18 @@ L_MIN, L_MAX, S_MAX = 13.0, 21.0, 1.5
 ALPHA_FLOOR = 0.5
 
 
-def entries_for(sample):
+def entries_for(preset, path=None):
     """One panel entry per scan: path, label, colour, and panel slot."""
     out = []
-    if sample == "MoS2_2L":
+    if preset is None:
+        files = (sorted(glob.glob(os.path.join(path, "*.ibw")))
+                 if os.path.isdir(path) else [path])
+        for i, p in enumerate(files):
+            tag = os.path.splitext(os.path.basename(p))[0]
+            out.append(dict(path=p, label=tag[-6:], tag=tag,
+                            tint=TINT[i % len(TINT)], slot=None, group=None))
+        return out
+    if preset == "MoS2_2L":
         fits = json.load(open(GRID_FITS))
         for g in range(1, 10):
             rows = [r for r in fits[str(g)]
@@ -98,15 +111,6 @@ def entries_for(sample):
     return out
 
 
-def pick_hexagon(spec_w, n, px, cfg, a_lat):
-    """Two moire vectors, using the strain filter where the sample needs it."""
-    if cfg["max_strain"] is None:
-        return find_hexagon(spec_w, n, px, cfg["klo"], cfg["khi"])
-    F = np.abs(spec_w)
-    cands = candidates(F, n, px, cfg["klo"], cfg["khi"])
-    b = best_hexagon(cands, F, n, px, cfg["klo"], cfg["khi"], [], 0.03,
-                     a_lat, cfg["max_strain"])
-    return (b[1], b[2]) if b else (None, None)
 
 
 def strain_field(path, cfg, crop=0.08, subdiv=3, sigma_frac=0.35):
@@ -119,11 +123,9 @@ def strain_field(path, cfg, crop=0.08, subdiv=3, sigma_frac=0.35):
     den = nlm(level(raw), 1.15)
 
     spec_w = np.fft.fftshift(np.fft.fft2(den * np.outer(np.hanning(n), np.hanning(n))))
-    b1, b2 = pick_hexagon(spec_w, n, px, cfg, a_lat)
-    if b1 is None:
-        return None
-    res = analyze(b1, b2, a_lat, "recip")
-    if not res["solutions"]:
+    b1, b2, res = find_moire(spec_w, n, px, a_lat, scan_nm=size,
+                             klo=cfg.get("klo"), khi=cfg.get("khi"))
+    if b1 is None or not res["solutions"]:
         return None
     theta = np.radians(res["solutions"][0]["twist"])
 
@@ -182,8 +184,21 @@ def voronoi_tiles(pts, lo, hi):
     return ([p for p, k in zip(polys, keep) if k], np.array(centers)[keep])
 
 
-def panel_a(ax, sample, entries):
-    if sample == "MoS2_2L":
+def panel_a(ax, layout, entries):
+    if layout == "list":
+        ax.set_xlim(0, 1)
+        ax.set_ylim(len(entries) + 0.5, -0.5)
+        for i, e in enumerate(entries):
+            ax.add_patch(Rectangle((0.04, i - 0.32), 0.14, 0.64,
+                                   fill=True, fc=e["tint"], ec="none"))
+            ax.text(0.24, i, e["label"], color="0.2", fontsize=8, va="center")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title("scans", fontsize=8, pad=4)
+        ax.text(-0.20, 1.16, "A", transform=ax.transAxes,
+                fontsize=15, fontweight="bold", va="top")
+        return
+    if layout == "grid":
         ax.set_xlim(-0.6, 2.6)
         ax.set_ylim(2.6, -0.6)
         for e in entries:
@@ -221,7 +236,12 @@ def panel_a(ax, sample, entries):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sample", default="MoS2_2L", choices=list(SAMPLES))
+    ap.add_argument("path", nargs="?", default=None,
+                    help="an .ibw file or folder. Omit only when using --preset")
+    ap.add_argument("--preset", default=None, choices=list(PRESETS),
+                    help="curated layout for a known sample")
+    ap.add_argument("-m", "--material", default=None, choices=list(MATERIALS),
+                    help="required unless --preset supplies it")
     ap.add_argument("--vmax", type=float, default=None,
                     help="symmetric colour limit in %% (overrides --pct)")
     ap.add_argument("--pct", type=float, default=98.0,
@@ -241,11 +261,31 @@ def main():
                          "fade out, since a weak moire signal gives an "
                          "unreliable phase gradient; 0 disables (default 25)")
     ap.add_argument("--crop", type=float, default=0.08)
+    ap.add_argument("--lo", type=float, default=None,
+                    help="min |k| (1/nm); default derived from scan geometry")
+    ap.add_argument("--hi", type=float, default=None,
+                    help="max |k| (1/nm); use with --lo for multi-period scans")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    cfg = SAMPLES[args.sample]
-    entries = entries_for(args.sample)
+    if args.preset is None and args.path is None:
+        ap.error("give a path to an .ibw file/folder, or --preset")
+    if args.preset:
+        cfg = dict(PRESETS[args.preset])
+        if args.material:
+            cfg["material"] = args.material
+        entries = entries_for(args.preset)
+        out_sample = args.preset
+    else:
+        if args.material is None:
+            ap.error("-m/--material is required without --preset "
+                     "(the lattice constant cannot be inferred from an image)")
+        label = os.path.basename(os.path.normpath(args.path))
+        cfg = dict(material=args.material, layout="list", title=label)
+        entries = entries_for(None, args.path)
+        out_sample = sample_of(args.path)
+    if args.lo is not None:
+        cfg["klo"], cfg["khi"] = args.lo, args.hi
     fields, tiles = {}, {}
     for e in entries:
         f = strain_field(e["path"], cfg, args.crop, args.subdiv, args.sigma_frac)
@@ -285,7 +325,7 @@ def main():
           f"spacing {spacing:.2f} nm   field FWHM ~{fwhm:.1f} nm "
           f"({fwhm/spacing:.1f}x oversampled, neighbouring tiles correlated)")
 
-    if args.sample == "MoS2_2L":
+    if cfg["layout"] == "grid":
         nrows, ratios = 4, [0.85, 1, 1, 1]
         cb_box = [0.52, 0.905, 0.20, 0.016]      # free space beside panel A
     else:
@@ -298,11 +338,11 @@ def main():
     fig_h = 3.0 + 2.9 * (nrows - 1)
     fig = plt.figure(figsize=(11.0, fig_h))
     # packed layouts put panels on the top row, so leave room for the title
-    top = 0.94 if args.sample == "MoS2_2L" else 0.895
+    top = 0.94 if cfg["layout"] == "grid" else 0.895
     gs = fig.add_gridspec(nrows, 3, height_ratios=ratios,
                           hspace=0.42, wspace=0.34,
                           left=0.085, right=0.965, top=top, bottom=0.055)
-    panel_a(fig.add_subplot(gs[0, 0]), args.sample, entries)
+    panel_a(fig.add_subplot(gs[0, 0]), cfg["layout"], entries)
 
     if cb_box is None:
         used = {tuple(fields[t][0]["slot"]) for t in fields} | {(0, 0)}
@@ -351,9 +391,10 @@ def main():
                 fontsize=6, color="0.35", va="bottom")
 
     fig.suptitle(f"Local strain mapping — {cfg['title']}", fontsize=12,
-                 y=0.975 if args.sample == "MoS2_2L" else 0.962)
-    out = args.out or os.path.join(results_for(args.sample),
+                 y=0.975 if cfg["layout"] == "grid" else 0.962)
+    out = args.out or os.path.join(results_for(out_sample),
                                    "figS13_strain_mapping.png")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     fig.savefig(out, dpi=200)
     print("wrote", out)
 
